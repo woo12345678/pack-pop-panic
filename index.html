@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f5e6c8">
+  <title>꽉! 팡! — PACK! POP! PANIC</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main id="game-shell">
+    <canvas id="game" width="960" height="540" tabindex="0" aria-label="철거장 게임 캔버스. 스페이스바나 포인터를 누르고 압축한 뒤 떼어 폭발시키세요."></canvas>
+    <p id="canvas-desc" class="sr-only">3개의 철거장을 각각 폭탄 3개 안에 정리합니다. 누르면 고철이 하나의 폭탄으로 압축되고, 떼면 표시된 칸 수만큼 연쇄 폭발합니다.</p>
+    <div id="topbar">
+      <button id="pause" type="button" aria-pressed="false" aria-label="게임 일시정지">Ⅱ</button>
+      <button id="mute" type="button" aria-pressed="false" aria-label="소리 끄기">♪</button>
+    </div>
+    <section id="title" class="panel" aria-labelledby="game-title">
+      <div class="warning-tape">철거 허가 완료 · CLEAR TO DEMOLISH</div>
+      <p class="eyebrow">손으로 꾹, 한 방에 팡!</p>
+      <h1 id="game-title"><span>꽉!</span> <span>팡!</span></h1>
+      <p class="english">PACK! POP! PANIC</p>
+      <div class="equation"><b>HOLD = PACK</b><i>→</i><b>RELEASE = BOOM</b></div>
+      <button id="start" class="big-button" type="button">철거 시작 <small>START</small></button>
+      <p class="hint">누르고 버티기 · 떼어서 폭발 / Pointer or Space</p>
+    </section>
+    <section id="pause-panel" class="panel compact" aria-labelledby="pause-title" hidden>
+      <h2 id="pause-title">잠깐 정지</h2><p>현장은 그대로예요 · PAUSED</p>
+      <button id="resume" class="big-button" type="button">계속하기</button>
+    </section>
+    <section id="result" class="panel" aria-labelledby="result-title" hidden>
+      <p class="eyebrow" id="result-kicker">철거 보고서</p>
+      <h2 id="result-title">완전 철거!</h2>
+      <p id="result-copy">세 구역이 먼지가 되었습니다.</p>
+      <div id="result-stats" aria-label="최종 철거 수치">
+        <p id="result-blast">THIS BLAST prepared 0칸 → 실제 파괴 0칸</p>
+        <p id="result-total">RUN TOTAL 0 / 0칸</p>
+      </div>
+      <button id="replay" class="big-button" type="button">다시 철거 <small>REPLAY</small></button>
+    </section>
+    <div id="live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+  </main>
+  <script src="rules.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>

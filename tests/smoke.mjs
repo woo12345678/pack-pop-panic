@@ -1,0 +1,79 @@
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { readFile, mkdir, writeFile, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { extname, join, resolve, sep } from 'node:path';
+import { spawn } from 'node:child_process';
+import { tmpdir } from 'node:os';
+
+const root = resolve(import.meta.dirname, '..');
+const evidence = join(root, 'evidence');
+const mime = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png'};
+const candidates = [process.env.CHROME_PATH, 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe', 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe'].filter(Boolean);
+const chromePath = candidates.find(existsSync);
+if (!chromePath) throw new Error('Smoke test requires installed Chromium/Chrome/Edge; none discovered.');
+
+const server = createServer(async (req,res) => {
+  try {
+    const url = new URL(req.url, 'http://localhost');
+    const rel = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname.slice(1));
+    const file = resolve(root, rel);
+    if (!file.startsWith(root + sep)) { res.writeHead(403).end(); return; }
+    const data = await readFile(file); res.writeHead(200, {'content-type':mime[extname(file)]||'application/octet-stream','cache-control':'no-store'}); res.end(data);
+  } catch { res.writeHead(404).end('not found'); }
+});
+await new Promise(r => server.listen(0, '127.0.0.1', r));
+const port = server.address().port, debugPort = 9300 + Math.floor(Math.random()*400);
+const profile = join(tmpdir(), 'pack-pop-smoke-' + process.pid);
+await mkdir(profile, {recursive:true}); await mkdir(evidence, {recursive:true});
+const browser = spawn(chromePath, ['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--hide-scrollbars',`--remote-debugging-port=${debugPort}`,`--user-data-dir=${profile}`,'about:blank'], {stdio:'ignore'});
+
+const delay = ms => new Promise(r=>setTimeout(r,ms));
+async function endpoint(){for(let i=0;i<60;i++){try{const j=await fetch(`http://127.0.0.1:${debugPort}/json/version`).then(r=>r.json());return j.webSocketDebuggerUrl}catch{await delay(100)}}throw new Error('Browser CDP endpoint unavailable')}
+class CDP {
+  constructor(ws){this.ws=ws;this.id=0;this.pending=new Map();ws.addEventListener('message',e=>{const m=JSON.parse(e.data);if(m.id&&this.pending.has(m.id)){const p=this.pending.get(m.id);this.pending.delete(m.id);m.error?p.reject(new Error(m.error.message)):p.resolve(m.result)}})}
+  send(method,params={}){return new Promise((resolve,reject)=>{const id=++this.id;this.pending.set(id,{resolve,reject});this.ws.send(JSON.stringify({id,method,params}))})}
+}
+let cdp;
+async function connect(){const ws=new WebSocket(await endpoint());await new Promise((r,j)=>{ws.onopen=r;ws.onerror=j});const browserCdp=new CDP(ws);const {targetId}=await browserCdp.send('Target.createTarget',{url:`http://127.0.0.1:${port}/`});const {sessionId}=await browserCdp.send('Target.attachToTarget',{targetId,flatten:true});let id=0,pending=new Map();ws.addEventListener('message',e=>{const m=JSON.parse(e.data);if(m.sessionId===sessionId&&m.id&&pending.has(m.id)){const p=pending.get(m.id);pending.delete(m.id);m.error?p.reject(new Error(m.error.message)):p.resolve(m.result)}});cdp={send(method,params={}){return new Promise((resolve,reject)=>{const mid=10000+(++id);pending.set(mid,{resolve,reject});ws.send(JSON.stringify({id:mid,sessionId,method,params}))})},close(){ws.close()}}}
+async function evalJs(expression){const r=await cdp.send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.exceptionDetails)throw new Error(r.exceptionDetails.text);return r.result.value}
+async function waitFor(expr, timeout=8000){const start=Date.now();while(Date.now()-start<timeout){if(await evalJs(expr))return;await delay(50)}throw new Error('Timed out: '+expr)}
+async function viewport(width,height,scale=1){await cdp.send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:scale,mobile:false,screenWidth:width,screenHeight:height});}
+async function shot(name){const {data}=await cdp.send('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});await writeFile(join(evidence,name),Buffer.from(data,'base64'))}
+async function clickSelector(sel){const r=await evalJs(`(()=>{const r=document.querySelector(${JSON.stringify(sel)}).getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2}})()`);await cdp.send('Input.dispatchMouseEvent',{type:'mousePressed',x:r.x,y:r.y,button:'left',clickCount:1});await cdp.send('Input.dispatchMouseEvent',{type:'mouseReleased',x:r.x,y:r.y,button:'left',clickCount:1})}
+async function key(type,key,code){await cdp.send('Input.dispatchKeyEvent',{type,key,code,windowsVirtualKeyCode:code==='Space'?32:80,nativeVirtualKeyCode:code==='Space'?32:80})}
+async function pressSpace(){await key('keyDown',' ','Space');await key('keyUp',' ','Space')}
+
+try {
+  await connect(); await cdp.send('Page.enable'); await cdp.send('Runtime.enable'); await viewport(1280,720,1); await cdp.send('Page.navigate',{url:`http://127.0.0.1:${port}/`});
+  await waitFor(`document.readyState==='complete' && !!window.__PACK_POP_DEBUG__`); await delay(200); await shot('01-title-1280x720.png');
+  assert.equal(await evalJs(`document.querySelector('#title').hidden`),false);
+  await evalJs(`document.querySelector('#start').focus()`); await pressSpace();
+  await waitFor(`window.__PACK_POP_DEBUG__.snapshot().state.phase==='playing'`); await shot('02-first-five-seconds.png');
+  await evalJs(`document.querySelector('#pause').click()`); let frozen=await evalJs(`window.__PACK_POP_DEBUG__.snapshot()`); assert.equal(frozen.state.paused,true); await evalJs(`window.__PACK_POP_DEBUG__.advance(2500)`); assert.deepEqual(await evalJs(`window.__PACK_POP_DEBUG__.snapshot()`),frozen,'debug advance cannot mutate paused state'); await evalJs(`document.querySelector('#resume').click()`);
+  await key('keyDown',' ','Space'); await delay(700); let s=await evalJs(`window.__PACK_POP_DEBUG__.snapshot()`); assert.equal(s.state.holding,true); assert.ok(s.state.blast>s.state.collectorBonus); await key('keyUp',' ','Space'); await waitFor(`window.__PACK_POP_DEBUG__.snapshot().state.phase==='exploding'`); await delay(390); s=await evalJs(`window.__PACK_POP_DEBUG__.snapshot()`); assert.ok(s.destroyed.length>=8,'visual apex must contain many real sequential hits'); await shot('03-huge-explosion.png');
+  await evalJs(`document.querySelector('#pause').click()`); frozen=await evalJs(`window.__PACK_POP_DEBUG__.snapshot()`); await delay(2400); assert.deepEqual(await evalJs(`window.__PACK_POP_DEBUG__.snapshot()`),frozen,'explosion pause freezes the exact snapshot beyond its normal duration'); await evalJs(`document.querySelector('#resume').click()`);
+  await waitFor(`window.__PACK_POP_DEBUG__.snapshot().state.phase==='tally'`,6000); await evalJs(`document.querySelector('#pause').click()`); frozen=await evalJs(`window.__PACK_POP_DEBUG__.snapshot()`); await delay(900); assert.deepEqual(await evalJs(`window.__PACK_POP_DEBUG__.snapshot()`),frozen,'tally pause freezes the exact snapshot beyond its normal duration'); await evalJs(`document.querySelector('#resume').click()`);
+  await waitFor(`window.__PACK_POP_DEBUG__.snapshot().state.phase==='playing'`,6000);
+  s=await evalJs(`window.__PACK_POP_DEBUG__.snapshot()`); assert.ok(s.consumed.length>0,'collected and destroyed cells share an authoritative consumed set'); const consumedAfterFirst=s.consumed.slice(); await evalJs(`window.__PACK_POP_DEBUG__.hold();window.__PACK_POP_DEBUG__.advance(650);window.__PACK_POP_DEBUG__.release()`); s=await evalJs(`window.__PACK_POP_DEBUG__.snapshot()`); assert.ok(consumedAfterFirst.every(id=>s.consumed.includes(id)),'consumed cells persist into the next charge'); assert.equal(s.consumed.length,new Set(s.consumed).size,'consumed IDs are unique');
+  await waitFor(`window.__PACK_POP_DEBUG__.snapshot().state.phase==='playing'`,6000);
+  await evalJs(`window.__PACK_POP_DEBUG__.hold();window.__PACK_POP_DEBUG__.advance(2500);window.__PACK_POP_DEBUG__.release()`); s=await evalJs(`window.__PACK_POP_DEBUG__.snapshot()`); assert.equal(s.state.preparedBlast.timing,'perfect'); assert.equal(s.state.preparedBlast.value,s.state.preparedBlast.base*2);
+  await waitFor(`window.__PACK_POP_DEBUG__.snapshot().state.phase==='playing'`,6000);
+  await evalJs(`window.__PACK_POP_DEBUG__.hold();window.__PACK_POP_DEBUG__.advance(3600)`); s=await evalJs(`window.__PACK_POP_DEBUG__.snapshot()`); assert.equal(s.state.preparedBlast.timing,'overheat'); assert.equal(s.state.preparedBlast.value,Math.floor(s.state.preparedBlast.base*.6));
+  await waitFor(`['playing','result'].includes(window.__PACK_POP_DEBUG__.snapshot().state.phase)`,7000);
+  let finalRelease;
+  for(let i=0;i<9 && !(await evalJs(`window.__PACK_POP_DEBUG__.snapshot().state.phase==='result'`));i++){await evalJs(`window.__PACK_POP_DEBUG__.hold();window.__PACK_POP_DEBUG__.advance(2500);window.__PACK_POP_DEBUG__.release()`);finalRelease=await evalJs(`window.__PACK_POP_DEBUG__.snapshot().state.preparedBlast`);await waitFor(`['playing','result'].includes(window.__PACK_POP_DEBUG__.snapshot().state.phase)`,7000)}
+  assert.equal(await evalJs(`window.__PACK_POP_DEBUG__.snapshot().state.phase`),'result'); assert.equal(await evalJs(`document.activeElement.id`),'replay'); await shot('04-result.png');
+  s=await evalJs(`window.__PACK_POP_DEBUG__.snapshot()`); assert.deepEqual(s.state.preparedBlast,finalRelease,'final prepared release stays frozen into result'); assert.equal(await evalJs(`document.querySelector('#result-blast').textContent`),`이번 폭발 / THIS BLAST prepared ${s.state.lastResult.preparedValue}칸 → 실제 파괴 ${s.state.lastResult.destroyed}칸`); assert.equal(await evalJs(`document.querySelector('#result-total').textContent`),`RUN TOTAL ${s.state.runDestroyed} / ${s.state.runQuota}칸`);
+  await pressSpace(); await waitFor(`window.__PACK_POP_DEBUG__.snapshot().state.phase==='playing'`); await evalJs(`document.querySelector('#pause').focus()`); await pressSpace(); s=await evalJs(`window.__PACK_POP_DEBUG__.snapshot()`); assert.equal(s.state.paused,true); assert.equal(s.state.pauseOwner,'user'); assert.equal(await evalJs(`document.activeElement.id`),'resume'); await pressSpace(); assert.equal(await evalJs(`window.__PACK_POP_DEBUG__.snapshot().state.paused`),false);
+  await key('keyDown',' ','Space'); await delay(150); assert.equal(await evalJs(`window.__PACK_POP_DEBUG__.snapshot().state.holding`),true); await key('keyUp',' ','Space'); assert.equal(await evalJs(`window.__PACK_POP_DEBUG__.snapshot().state.phase`),'exploding'); await waitFor(`window.__PACK_POP_DEBUG__.snapshot().state.phase==='playing'`,6000);
+  await evalJs(`Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});document.dispatchEvent(new Event('visibilitychange'))`); s=await evalJs(`window.__PACK_POP_DEBUG__.snapshot()`); assert.equal(s.state.paused,true); assert.equal(s.state.pauseOwner,'visibility'); await evalJs(`delete document.hidden;document.dispatchEvent(new Event('visibilitychange'))`); assert.equal(await evalJs(`window.__PACK_POP_DEBUG__.snapshot().state.paused`),true); await clickSelector('#resume');
+  await clickSelector('#mute'); assert.equal(await evalJs(`document.querySelector('#mute').getAttribute('aria-pressed')`),'true');
+  await viewport(390,844,2); await delay(300); s=await evalJs(`window.__PACK_POP_DEBUG__.snapshot()`); assert.equal(s.backing.width,780); assert.equal(s.backing.height,1688); assert.equal(await evalJs(`document.documentElement.scrollWidth<=innerWidth && document.documentElement.scrollHeight<=innerHeight`),true); const g=s.geometry,inside=(a,b)=>a.x>=b.x&&a.y>=b.y&&a.x+a.w<=b.x+b.w&&a.y+a.h<=b.y+b.h,overlap=(a,b)=>a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y; assert.ok(inside(g.hud,g.viewport)&&inside(g.grid,g.viewport)&&inside(g.bombLabel,g.viewport)&&inside(g.instruction,g.viewport)); assert.equal(overlap(g.bomb,g.bombLabel),false,'bomb label must not overlap bomb'); const controls=await evalJs(`Array.from(document.querySelectorAll('#topbar button')).map(e=>{const r=e.getBoundingClientRect();return{x:r.x,y:r.y,w:r.width,h:r.height}})`); controls.forEach(r=>{assert.ok(r.w>=44&&r.h>=44);assert.ok(r.x>=0&&r.y>=0&&r.x+r.w<=390&&r.y+r.h<=844)}); await shot('05-portrait-390x844@2x.png');
+  await viewport(900,400,1); await delay(200); assert.equal(await evalJs(`document.documentElement.scrollHeight<=innerHeight`),true);
+  console.log('Smoke passed: title/start, real Space hold/release, perfect, overheat, tally/result, pause, mute, focus, responsive backing, screenshots.');
+} finally {
+  if(cdp) cdp.close(); browser.kill(); server.close();
+  await Promise.race([new Promise(r=>browser.once('exit',r)),delay(1500)]);
+  const resolved=resolve(profile); if(resolved.startsWith(resolve(tmpdir())+sep)&&resolved.includes('pack-pop-smoke-')) { for(let i=0;i<4;i++){try{await rm(resolved,{recursive:true,force:true,maxRetries:2,retryDelay:100});break}catch(e){if(i===3)console.warn('Temporary browser profile cleanup deferred:',e.code);await delay(250)}} }
+}

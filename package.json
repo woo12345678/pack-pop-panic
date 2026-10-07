@@ -1,0 +1,12 @@
+{
+  "name": "pack-pop-panic",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dependency-free demolition arcade game",
+  "scripts": {
+    "test": "node --test tests/rules.test.js && node tests/smoke.mjs",
+    "test:rules": "node --test tests/rules.test.js",
+    "test:smoke": "node tests/smoke.mjs",
+    "check": "node --check rules.js && node --check game.js && node --check tests/rules.test.js && node --check tests/smoke.mjs"
+  }
+}
